@@ -1,0 +1,319 @@
+cmake_minimum_required (VERSION 3.13.0)
+project (novadb_PLUS)
+
+execute_process(COMMAND ./mkreleasehdr.sh WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+
+option(novadb_DEBUG "define novadb_DEBUG" OFF)
+if(novadb_DEBUG)
+    add_definitions(-Dnovadb_DEBUG)
+endif()
+
+option(COM_OPT_LTO "compile optimize with lto" ON)
+option(COM_OPT_PGO_GEN "compile optimize with pgo, profile-generate" OFF)
+option(COM_OPT_PGO_USE "compile optimize with pgo, profile-use" OFF)
+
+if(COM_OPT_LTO)
+    message("compile optimize with lto")
+    set(CMAKE_AR "gcc-ar")
+    set(CMAKE_NM "gcc-nm")
+    set(CMAKE_RANLIB "gcc-ranlib")
+
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto=auto")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto=auto")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto=auto")
+endif()
+
+set(pgo_dir ${PROJECT_SOURCE_DIR}/pgo)
+message("pgo_dir: ${pgo_dir}")
+if(COM_OPT_PGO_GEN)
+    message("compile optimize with pgo, profile-generate")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -fprofile-dir=${pgo_dir} -fprofile-generate=${pgo_dir}")
+endif()
+if(COM_OPT_PGO_USE)
+    message("compile optimize with pgo, profile-use")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -fprofile-dir=${pgo_dir} -fprofile-use=${pgo_dir} -fprofile-correction -fprofile-partial-training -Wno-error=missing-profile")
+endif()
+
+# configure compiler requirement
+message(${CMAKE_CXX_COMPILER})
+if(CMAKE_COMPILER_IS_GNUCC)
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 8)
+        message(FATAL_ERROR "g++ version ${CMAKE_CXX_COMPILER_VERSION}, Require at least gcc-8, \
+        you may remove CMakeCache.txt and run export CXX=/path/to/your/prefered/cxx_compiler before run cmake \
+        to solve this problem")
+    endif()
+elseif(MSVC AND MSVC_VERSION GREATER_EQUAL 1900)
+	message("using MSVC ${MSVC_VERSION}")
+	# TODO: check msvc version
+	# for rocksdb, disable warning as errors
+	add_compile_options(/WX-)
+
+	# for glog
+	add_definitions(-DGLOG_NO_ABBREVIATED_SEVERITIES)
+
+	# for asio
+	#add_definitions(-DWIN32_LEAN_AND_MEAN)
+
+	# disable warnings
+	#add_compile_options(/wC4099)
+else()
+    message(FATAL_ERROR "gcc or vs2015(update 2)+ is required")
+endif()
+
+if(CMAKE_COMPILER_IS_GNUCC)
+	set(STDFS_LIB "stdc++fs")
+    option(NEW_ROCKSDB "new rocksdb version" ON)
+    if(NEW_ROCKSDB)
+        message("using rocksdb-v8.5.3")
+        set(patchCommand
+            "cd ${PROJECT_SOURCE_DIR}/src/thirdparty/rocksdb/rocksdb\;
+             git am --abort\;
+             git am -s ../../patch/0001-add-statistic-for-sst-file-info.patch\;
+             git am -s ../../patch/0002-add-latency-statistic-log.patch\; ")
+		execute_process(COMMAND bash "-c" ${patchCommand})
+        set(ROCKSDB_DIR "${PROJECT_SOURCE_DIR}/src/thirdparty/rocksdb")
+    else()
+        message("using rocksdb-5.13.4")
+        set(ROCKSDB_DIR "${PROJECT_SOURCE_DIR}/src/thirdparty/rocksdb-5.13.4")
+    endif()
+else()
+    set(NEW_ROCKSDB on)
+	set(STDFS_LIB "")
+	set(ROCKSDB_DIR "${PROJECT_SOURCE_DIR}/src/thirdparty/rocksdb")
+endif()
+
+set(CMAKE_MODULE_PATH "${ROCKSDB_DIR}/cmake/modules/")
+
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+option(WITH_ASAN "build with ASAN" OFF)
+option(WITH_TSAN "build with WITH_TSAN" OFF)
+option(ENABLE_JEMALLOC "enable jemalloc" ON)
+option(BUILD_novadb_STATIC "build novadb staticly" OFF)
+if(WITH_ASAN)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fno-omit-frame-pointer -fno-common -static-libasan")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer -fno-common -static-libasan")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fno-omit-frame-pointer -fno-common -static-libasan")
+  set (CMAKE_LINKER_FLAGS_DEBUG "${CMAKE_LINKER_FLAGS_DEBUG} -fsanitize=address -fno-omit-frame-pointer -fno-common -static-libasan")
+  list(APPEND SYS_LIBS "-fsanitize=address -fno-omit-frame-pointer -fno-common -static-libasan")
+  add_definitions(-DWITH_ASAN)
+  set(WITH_TSAN OFF)
+  message("ASAN won't work with TSAN")
+  set(ENABLE_JEMALLOC OFF)
+  message("ASAN would disabled JeMalloc")
+  set(BUILD_novadb_STATIC OFF)
+  message("ASAN would disabled staticly compile, too")
+endif()
+
+if(WITH_TSAN)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fno-omit-frame-pointer -fsanitize=thread -pie -lpthread -lm -static-libtsan")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer -fsanitize=thread -fPIC -lpthread -lm -static-libtsan")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer -fsanitize=thread -fPIC -lpthread -lm -static-libtsan")
+  set (CMAKE_LINKER_FLAGS_DEBUG "${CMAKE_LINKER_FLAGS_DEBUG} -fno-omit-frame-pointer -fsanitize=thread -fPIC -lpthread -lm -static-libtsan")
+  list(APPEND SYS_LIBS "-fsanitize=thread -lpthread -lm -static-libtsan")
+  add_definitions(-DWITH_TSAN)
+  set(WITH_ASAN OFF)
+  message("TSAN won't work with ASAN")
+  set(ENABLE_JEMALLOC OFF)
+  message("TSAN would disabled JeMalloc")
+  set(BUILD_novadb_STATIC OFF)
+  message("TSAN would disabled staticly compile, too")
+endif()
+
+option(WITH_COVER "build with COVER" OFF)
+if(WITH_COVER)
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage")
+   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
+   add_definitions(-DWITH_COVER)
+endif()
+
+if(CMAKE_COMPILER_IS_GNUCC)
+	if(ENABLE_JEMALLOC)
+		set(JEMALLOC_ROOT_DIR "${PROJECT_SOURCE_DIR}/src/thirdparty/jemalloc")
+		add_definitions(-Dnovadb_JEMALLOC)
+
+		if(COM_OPT_LTO)
+			message("COM_OPT_LTO is ON, we need jemalloc prof be false, otherwise the process will be hanged")
+		else()
+			set(patchCommand "cd ${PROJECT_SOURCE_DIR}/src/thirdparty/jemalloc\; git apply ../patch/jemalloc_patch.diff")
+			message("jemalloc git patch, we force set jemalloc  prof:true")
+			execute_process(COMMAND bash "-c" ${patchCommand} OUTPUT_VARIABLE FOO)
+		endif()
+
+		set(WITH_JEMALLOC ON)
+
+		add_custom_command(OUTPUT "${JEMALLOC_ROOT_DIR}/include/jemalloc/jemalloc.h"
+                # NOTE(takenliu) support jemalloc profile, before start novadbplus need export as below:
+                #     export MALLOC_CONF="prof:true,prof_prefix:jeprof.out"
+				COMMAND ./autogen.sh --enable-prof --disable-shared CFLAGS=-Wno-missing-attributes CXXFLAGS=-Wno-missing-attributes
+				WORKING_DIRECTORY ${JEMALLOC_ROOT_DIR})
+		add_custom_command(OUTPUT "${JEMALLOC_ROOT_DIR}/lib/libjemalloc_pic.a"
+				COMMAND make -j16
+				DEPENDS "${JEMALLOC_ROOT_DIR}/include/jemalloc/jemalloc.h"
+				WORKING_DIRECTORY ${JEMALLOC_ROOT_DIR}
+				COMMENT "Making external library jemalloc")
+		add_custom_target(build_jemalloc
+				DEPENDS "${JEMALLOC_ROOT_DIR}/lib/libjemalloc_pic.a")
+
+		add_library(jemalloc STATIC IMPORTED)
+		set_target_properties(jemalloc PROPERTIES IMPORTED_LOCATION "${JEMALLOC_ROOT_DIR}/lib/libjemalloc_pic.a")
+
+		list(APPEND SYS_LIBS jemalloc)
+		list(APPEND THIRDPARTY_LIBS jemalloc)
+		add_dependencies(jemalloc build_jemalloc)
+
+		set(JeMalloc_INCLUDE_DIRS ${JEMALLOC_ROOT_DIR}/include)
+		link_directories(${JEMALLOC_ROOT_DIR}/lib/)
+		set(JeMalloc_LIBRARIES ${JEMALLOC_ROOT_DIR}/lib/libjemalloc_pic.a)
+	endif()
+
+	list(APPEND SYS_LIBS "dl" "pthread" "rt")
+	# thirdparty code
+	# do not set unnecessary flags before thirdparty dirs
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -g -fno-omit-frame-pointer ")
+
+	add_definitions(-DROCKSDB_PLATFORM_POSIX -DROCKSDB_LIB_IO_POSIX -DROCKSDB_SUPPORT_THREAD_LOCAL)
+endif()
+
+# TODO(vinchen): in the future it should disable sync_ponit in production
+add_definitions(-DWITH_SYNC_POINT)
+add_subdirectory(src/thirdparty/gflag)
+add_subdirectory(src/thirdparty/snappy)
+target_compile_options(snappy PRIVATE -fPIC)
+add_subdirectory(src/thirdparty/lz4/contrib/cmake_unofficial)
+add_subdirectory(src/thirdparty/googletest)
+add_subdirectory(src/thirdparty/glog glog EXCLUDE_FROM_ALL)
+
+list(APPEND SYS_LIBS sync_point)
+list(APPEND SYS_LIBS snappy)
+
+set(WITH_TESTS OFF)
+set(WITH_BENCHMARK_TOOLS OFF)
+set(WITH_TOOLS OFF)
+set(WITH_JNI OFF)
+set(WITH_GFLAGS OFF)
+set(WITH_CORE_TOOLS OFF)
+set(WITH_TOOLS OFF)
+
+add_definitions(-DSNAPPY)
+set(snappy_FOUND TRUE)
+set(snappy_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/thirdparty/include/snappy/)
+set(snappy_LIBRARIES ${CMAKE_BINARY_DIR}/lib/libsnappy.a)
+list(APPEND THIRDPARTY_LIBS snappy)
+set(LZ4_FOUND TRUE)
+set(LZ4_LIBRARIES ${CMAKE_BINARY_DIR}/lib/liblz4.a)
+include_directories("src/thirdparty/lz4/lib/")
+list(APPEND THIRDPARTY_LIBS ${LZ4_LIBRARIES})
+
+add_definitions(-DENABLE_CJSON_GLOBAL)
+option(RAPIDJSON_BUILD_TESTS "" OFF)
+add_subdirectory(src/thirdparty/rapidjson)
+add_subdirectory(src/thirdparty/lua)
+
+add_subdirectory(${ROCKSDB_DIR}/rocksdb rocksdb EXCLUDE_FROM_ALL)
+target_compile_options(rocksdb PRIVATE -DLZ4)
+if(CMAKE_COMPILER_IS_GNUCC)
+set(WARN_C_CXX
+"-Wall \
+-Wextra \
+-Wno-unused-but-set-variable \
+-Wno-unused-parameter \
+-Wno-unused-local-typedefs \
+-Wno-missing-field-initializers \
+-Wno-implicit-fallthrough \
+-Wendif-labels \
+-Wno-float-equal \
+-Wformat=2 \
+-Wframe-larger-than=69632 \
+-Wmissing-include-dirs \
+-Wpointer-arith \
+-Wwrite-strings \
+-Werror=char-subscripts \
+-Werror=comments \
+-Werror=conversion-null \
+-Werror=empty-body \
+-Werror=endif-labels \
+-Werror=format \
+-Werror=format-nonliteral \
+-Werror=missing-include-dirs \
+-Werror=overflow \
+-Werror=parentheses \
+-Werror=reorder \
+-Werror=return-type \
+-Werror=sequence-point \
+-Werror=sign-compare \
+-Werror=switch \
+-Werror=type-limits \
+-Werror=uninitialized \
+-Wno-maybe-uninitialized \
+-Werror=unused-function \
+-Werror=unused-label \
+-Werror=unused-result \
+-Werror=unused-value \
+-Werror=unused-variable \
+-Werror=write-strings")
+
+set(WARN_CXX_ONLY
+"-Wno-invalid-offsetof \
+-Wnon-virtual-dtor \
+-Woverloaded-virtual \
+-Wvla \
+-Werror=non-virtual-dtor \
+-Werror=overloaded-virtual \
+-Werror=vla")
+
+set(WARN_C_ONLY
+"-Werror-implicit-function-declaration")
+
+# gflags
+
+include_directories("src/thirdparty/include")
+include_directories("src/thirdparty/include/snappy/")
+include_directories("src/thirdparty/lz4/lib/")
+else()
+include_directories("${PROJECT_SOURCE_DIR}/src/novadbplus/include")
+#include_directories("${PROJECT_SOURCE_DIR}/src/novadbplus/include/snappy")
+#include_directories("${PROJECT_SOURCE_DIR}/src/thirdparty/lz4/lib/")
+
+# gflags
+include_directories("src/thirdparty/include/Windows/")
+ENDIF()
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 ${WARN_C_CXX} ${WARN_CXX_ONLY}")
+
+add_definitions(-DASIO_STANDALONE)
+add_definitions(-DRAPIDJSON_HAS_STDSTRING)
+
+message("CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
+message("CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
+message("CMAKE_CXX_FLAGS_RELEASE: ${CMAKE_CXX_FLAGS_RELEASE}")
+include_directories("${PROJECT_SOURCE_DIR}/src")
+
+include_directories("${PROJECT_SOURCE_DIR}/src/thirdparty/googletest/googletest/include")
+include_directories("${PROJECT_SOURCE_DIR}/src/thirdparty/asio/asio/include")
+include_directories("${PROJECT_SOURCE_DIR}/src/thirdparty/glog")
+include_directories("${PROJECT_SOURCE_DIR}/src/thirdparty/glog/src")
+include_directories("${PROJECT_SOURCE_DIR}/src/thirdparty/jemalloc/include")
+include_directories("${PROJECT_SOURCE_DIR}/src/thirdparty/rapidjson/include")
+include_directories("${PROJECT_SOURCE_DIR}/src/thirdparty/lua/src")
+include_directories(${ROCKSDB_DIR})
+include_directories(${ROCKSDB_DIR}/rocksdb)
+include_directories(${ROCKSDB_DIR}/rocksdb/include)
+
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
+
+add_subdirectory(src/novadbplus/network)
+add_subdirectory(src/novadbplus/utils)
+add_subdirectory(src/novadbplus/server)
+add_subdirectory(src/novadbplus/commands)
+add_subdirectory(src/novadbplus/storage)
+add_subdirectory(src/novadbplus/replication)
+add_subdirectory(src/novadbplus/cluster)
+add_subdirectory(src/novadbplus/lock)
+add_subdirectory(src/novadbplus/script)
+if(NOT WITH_ASAN AND NOT WITH_TSAN AND NEW_ROCKSDB)
+add_subdirectory(src/novadbplus/tools)
+endif()

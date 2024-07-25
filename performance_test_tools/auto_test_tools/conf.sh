@@ -1,0 +1,11 @@
+dir=../scripts
+data_dir=home
+ip=127.0.0.1
+port=51002
+redisClient=redis-cli
+bin=../bin/novadbplus
+confFile=novadbplus.conf
+clusterEnable=true
+coreNum=48
+#passwdString="-a pw"
+benchDir=~
